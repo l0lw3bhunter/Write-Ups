@@ -45,6 +45,7 @@ s.close();
 ```
 
 ### Initial Access
+- Run the new project with the groovy reverse shell and start a listener
 - Obtained reverse shell as `kohsuke` user
 - Found KeePass database: `C:\Users\kohsuke\Documents\CEH.kdbx`
 - Exfiltrated via SMB:
